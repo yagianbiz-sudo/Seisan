@@ -12,7 +12,7 @@ POSITIONS_JSON = DATA_DIR / "positions.json"  # 自分の保有（売りシグ�
 MODEL = "claude-opus-5-5"
 
 # 今年のテーマ（ナレッジ5-2・7章）。年が変わったら / 発言が出たら更新する。
-CURRENT_THEMES = ["AI・半導体", "建設", "メガバンク", "内需"]
+CURRENT_THEMES = ["AI・半導体", "AIインフラ", "建設", "メガバンク", "内需"]  # 2026/10時点（kb7・9章）
 
 # --- 恐怖指数（ナレッジ5-3。動画での本人の基準） ---
 FG_EXTREME_FEAR = 20     # Fear & Greed がこれ未満＝買いサイン
