@@ -4,3 +4,6 @@ choruko/data/positions.json
 choruko/data/sources.jsonl
 choruko/data/distilled.json
 choruko/reports/
+# 字幕（他人の動画の書き起こし）は公開リポジトリに上げない
+choruko/knowledge/transcripts/
+choruko/knowledge/transcripts_bundle/

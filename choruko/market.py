@@ -134,11 +134,16 @@ def fetch_fear_greed():
     return {"score": round(float(fg["score"]), 1), "rating": fg.get("rating")}
 
 
-def fetch_nikkei_vi():
-    html = http_get("https://indexes.nikkei.co.jp/nkave/index/profile?idx=nk225vi")
-    for pat in (r'id="price"[^>]*>\s*([\d,]+\.\d+)',
+def parse_nikkei_vi(html):
+    """日経VIの現在値を、プロファイルページの HTML から読む。"""
+    # 値は <div id="price"><!--daily_changing-->30.14</div> の形で入る（コメントを飛ばす）
+    for pat in (r'id="price"[^>]*>(?:\s*<!--.*?-->)?\s*([\d,]+\.\d+)',
                 r'現在値[^0-9]{0,200}?([\d,]+\.\d+)'):
         m = re.search(pat, html, re.S)
         if m:
             return float(m.group(1).replace(",", ""))
     raise ValueError("日経VIをページから読み取れなかった")
+
+
+def fetch_nikkei_vi():
+    return parse_nikkei_vi(http_get("https://indexes.nikkei.co.jp/nkave/index/profile?idx=nk225vi"))
