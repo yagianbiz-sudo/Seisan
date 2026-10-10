@@ -1,0 +1,2 @@
+anthropic>=1.13   # suggest / distill（任意）を使うときだけ
+yt-dlp            # yt コマンド（出演動画の字幕取得）
