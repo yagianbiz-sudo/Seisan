@@ -9,6 +9,7 @@
     python -m choruko suggest                 # 今日の「ちょる子ならこうする」レポート（AI）
     python -m choruko pos add 8035 38000 100 --wallet attack
     python -m choruko pos list / pos rm 8035
+    python -m choruko yt discover / yt fetch --limit 100 / yt bundle   # 出演動画の字幕を集める
 
 日経VIが自動で取れないときは --nvi 31.5 のように手で渡す。
 """
@@ -207,6 +208,27 @@ def cmd_pos(a):
         print(f"{p['code']}  買値{p['entry']}  {p['shares']}株  {p['wallet']}  ({p['date']})")
 
 
+def cmd_yt(a):
+    from . import youtube
+    if a.action == "discover":
+        log("ちょる子の出演動画を探しています（数分かかります）…")
+        youtube.discover(a.per_query, log=log, browser=a.browser)
+    elif a.action == "add":
+        if not a.url:
+            sys.exit("yt add URL")
+        print("追加しました" if youtube.add_url(a.url) else "既に一覧にあります")
+    elif a.action == "fetch":
+        log(f"字幕を最大{a.limit}本取得します（1本数秒。止めても続きから再開できます）…")
+        n = youtube.fetch(a.limit, log=log, browser=a.browser)
+        print(f"{n}本保存 → {youtube.TRANSCRIPTS_DIR}")
+    elif a.action == "bundle":
+        for p in youtube.bundle():
+            print(p)
+        log("↑ これを Claude のプロジェクトにアップロードするか、git push してください")
+    total, counts = youtube.summary()
+    log(f"一覧 {total}本: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m choruko", description="ちょる子式トレード推論")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -242,6 +264,14 @@ def main(argv=None):
     p.add_argument("shares", nargs="?", type=int)
     p.add_argument("--wallet", default="attack", choices=["attack", "defense"])
     p.set_defaults(fn=cmd_pos)
+
+    p = sub.add_parser("yt", help="出演動画の字幕を集める（要 yt-dlp）")
+    p.add_argument("action", choices=["discover", "add", "fetch", "bundle", "status"])
+    p.add_argument("url", nargs="?", help="yt add のときの動画URL")
+    p.add_argument("--limit", type=int, default=100, help="fetch で取る本数")
+    p.add_argument("--per-query", type=int, default=100, help="discover の検索1回あたりの件数")
+    p.add_argument("--browser", help="YouTube にボット確認されたら chrome / edge / firefox などを指定（ログイン情報を使う）")
+    p.set_defaults(fn=cmd_yt)
 
     a = ap.parse_args(argv)
     if a.cmd == "pos" and a.action == "add" and None in (a.code, a.entry, a.shares):

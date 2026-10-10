@@ -121,5 +121,47 @@ class CliOffline(unittest.TestCase):
         self.assertIn("ちょる子なら今日どう動く？", text)
 
 
+
+VTT = """WEBVTT
+Kind: captions
+Language: ja
+
+00:00:00.000 --> 00:00:02.000
+<c>こんばんは</c>ちょる子です
+
+00:00:02.000 --> 00:00:04.000
+こんばんは<00:00:03.000>ちょる子です
+
+00:00:02.000 --> 00:00:04.000
+こんばんはちょる子です
+今日は&amp;日経平均の話
+
+00:00:04.000 --> 00:00:06.000
+今日は&amp;日経平均の話
+"""
+
+
+class YouTube(unittest.TestCase):
+    def test_vtt_to_text_dedupes_rolling_captions(self):
+        from choruko import youtube
+        self.assertEqual(youtube.vtt_to_text(VTT), "こんばんはちょる子です\n今日は&日経平均の話")
+
+    def test_add_url_and_bundle(self):
+        from choruko import youtube
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            with mock.patch.object(youtube, "VIDEOS_JSON", d / "v.json"), \
+                 mock.patch.object(youtube, "TRANSCRIPTS_DIR", d / "t"), \
+                 mock.patch.object(youtube, "BUNDLE_DIR", d / "b"):
+                self.assertTrue(youtube.add_url("https://www.youtube.com/watch?v=20veURNFU7o"))
+                self.assertFalse(youtube.add_url("https://youtu.be/20veURNFU7o"))
+                (d / "t").mkdir()
+                for i in range(3):
+                    (d / "t" / f"2026-0{i+1}-01_x{i}.md").write_text("あ" * 100, encoding="utf-8")
+                paths = youtube.bundle(max_chars=250)
+                self.assertEqual(len(paths), 2)
+                self.assertEqual(youtube.summary(), (1, {"new": 1}))
+
+
 if __name__ == "__main__":
     unittest.main()

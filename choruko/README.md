@@ -30,6 +30,22 @@ python -m choruko pos add 8035 38000 100   # 保有を登録すると損切り�
 
 出力は `reports/prompt-YYYY-MM-DD.md` にも保存されます。それをチャットに貼ってください。
 
+## 出演動画の字幕を100本集める
+
+お手元のPCで実行します（`pip install yt-dlp`）。字幕は YouTube の自動生成なので誤字はありますが、話の中身は十分に読めます。
+
+```bash
+python -m choruko yt discover             # 出演動画を探す（検索20パターン＋田端大学・松井証券・ブルーモ証券・ReHacQ・PIVOT のチャンネル）
+python -m choruko yt fetch --limit 100    # 字幕を knowledge/transcripts/ に保存（途中で止めても続きから再開）
+python -m choruko yt bundle               # 約40万字ずつにまとめて knowledge/transcripts_bundle/ に出力
+python -m choruko yt add https://www.youtube.com/watch?v=...   # 見つからなかった動画を手で追加
+```
+
+- 一覧は `data/videos.json` です。確認済みの44本（田端大学の日曜ライブ、テスタの魔法株学校、ちょる子の投資教室、ReHacQ など）が最初から入っています。
+- 「ボットではないことを確認」と出て止まるときは、`--browser chrome`（または edge / firefox）を付けてください。ブラウザのログイン情報を使って取得します。
+- 取り終わったら、`git add choruko/knowledge/transcripts choruko/data/videos.json && git commit -m "Add transcripts" && git push` を実行してください。push 後に Claude Code へ「字幕をナレッジに統合して」と頼めば、ナレッジに統合されます。
+- `transcripts_bundle/` のファイルは、そのまま claude.ai のプロジェクトのナレッジに追加することもできます。
+
 ## ナレッジを育てる
 
 - YouTube の動画ページで「文字起こしを表示」から全文をコピーし、チャットに貼って「ちょる子ナレッジに統合して」と頼む
