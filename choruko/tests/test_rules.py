@@ -103,6 +103,23 @@ class CliOffline(unittest.TestCase):
         self.assertIn('"regime": "panic"', text)
         self.assertIn("8035 東京エレクトロン", text)
 
+    def test_prompt_builds_chat_text(self):
+        def fake_daily(code, range_="6mo"):
+            return snap([100] * 40 + [88], code) if code == "8035" else snap([100] * 41, code)
+        with tempfile.TemporaryDirectory() as d, \
+             mock.patch.object(market, "fetch_daily", fake_daily), \
+             mock.patch.object(market, "fetch_fear_greed", lambda: {"score": 18, "rating": "extreme fear"}), \
+             mock.patch.object(market, "fetch_nikkei_vi", lambda: 33.0), \
+             mock.patch.object(cli, "load_positions", lambda: []), \
+             mock.patch.object(collector, "recent", lambda n: []), \
+             mock.patch.object(cli.C, "REPORTS_DIR", Path(d)), \
+             mock.patch("builtins.print") as out:
+            cli.main(["prompt"])
+        text = next(c.args[0] for c in out.call_args_list if "file" not in c.kwargs)
+        self.assertIn("Fear & Greed: 18", text)
+        self.assertIn("8035 東京エレクトロン", text)
+        self.assertIn("ちょる子なら今日どう動く？", text)
+
 
 if __name__ == "__main__":
     unittest.main()

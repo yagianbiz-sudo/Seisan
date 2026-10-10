@@ -10,13 +10,13 @@ DISTILLED_JSON = C.DATA_DIR / "distilled.json"
 
 SYSTEM = """\
 あなたは個人投資家「ちょる子」(@kabu_st0ck) の投資手法を研究しているアナリストです。
-下のプレイブック（公開インタビューから再構成したルール集）と、そこから学習したメモだけを根拠にして、
+下のナレッジベース（公開インタビューから集めた手法・発言・事例）と、そこから学習したメモだけを根拠にして、
 「ちょる子がこのルールで今日の相場に臨んだら何をするか」を推論します。
 
 守ること:
 - ちょる子本人の実際の売買は分かりません。出すのは「ルールを今日の相場に当てはめた推定」です。本人が「今日これを買った」かのようには書かないこと。
-- どの判断にも、根拠にしたルールID（E1, X1 など）を付けること。確度Cのルールに頼る判断はそう明記すること。
-- 本人が公開した最新の発言（web検索で見つかったもの）がプレイブックと食い違うときは、最新の発言を優先し、食い違いを指摘すること。
+- どの判断にも、根拠にしたナレッジの章番号（5-4, 5-5 など）を付けること。確度Cのルールに頼る判断はそう明記すること。
+- 本人が公開した最新の発言（web検索で見つかったもの）がナレッジと食い違うときは、最新の発言を優先し、食い違いを指摘すること。
 - 本人も1日に数千万円の損失を出している手法です。ユーザーの資金に当てはめるときは、レバレッジを使わない場合のサイズ感と損切りラインを必ず添えること。
 - 何もしないのが正解の日は「見送り」とはっきり書くこと。無理に候補を出さないこと。
 
@@ -31,9 +31,9 @@ SYSTEM = """\
 
 
 def _system_blocks():
-    playbook = (C.KNOWLEDGE_DIR / "playbook.md").read_text(encoding="utf-8")
+    kb = (C.KNOWLEDGE_DIR / "choruko_kb.md").read_text(encoding="utf-8")
     learned = LEARNED_MD.read_text(encoding="utf-8") if LEARNED_MD.exists() else "(まだなし)"
-    text = (f"{SYSTEM}\n\n<playbook>\n{playbook}\n</playbook>\n\n"
+    text = (f"{SYSTEM}\n\n<knowledge_base>\n{kb}\n</knowledge_base>\n\n"
             f"<learned_notes>\n{learned}\n</learned_notes>")
     # 知識ベースは毎回同じなのでキャッシュする
     return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
@@ -73,7 +73,7 @@ def suggest(today, market, candidates, positions, sources, web=True):
         ],
     }
     prompt = (
-        f"今日は {today} です。下のデータは、プレイブックのルールで機械的にふるいにかけた結果です。\n"
+        f"今日は {today} です。下のデータは、ナレッジのルールで機械的にふるいにかけた結果です。\n"
         + ("まず web 検索で、ちょる子（@kabu_st0ck）が直近1〜2週間に公開した発言・記事・"
            "注目銘柄を確認してください。見つからなければ「見つからなかった」と書いてください。\n"
            if web else "")
@@ -86,11 +86,11 @@ def suggest(today, market, candidates, positions, sources, web=True):
 
 DISTILL_PROMPT = """\
 下は、ちょる子（@kabu_st0ck）について新しく集めた記事・投稿です。
-プレイブックにまだ載っていない、または食い違う情報だけを抜き出して、learned.md に追記するメモを書いてください。
+ナレッジにまだ載っていない、または食い違う情報だけを抜き出して、learned.md に追記するメモを書いてください。
 
 形式（Markdown の箇条書き。該当がなければ「- 新しい情報なし」とだけ書く）:
 - [日付] 内容（手法 / 銘柄・テーマ / 相場観 / マインド のどれか）— 確度A/B/C — 出典URL
-  - 食い違う場合は、プレイブックのどのルールIDとどう違うか
+  - 食い違う場合は、ナレッジのどの章とどう違うか
 
 本人の発言と、記者・第三者の解釈は区別すること。推測で埋めないこと。
 """

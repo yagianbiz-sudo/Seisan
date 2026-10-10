@@ -5,6 +5,7 @@
     python -m choruko note "Xの投稿本文" --url https://x.com/kabu_st0ck/status/... --kind x
     python -m choruko distill                 # 集めた情報から新しい学びを learned.md に追記（AI）
     python -m choruko screen                  # ルールだけで地合いと逆張り候補を判定（AIなし）
+    python -m choruko prompt                  # 今日の数字入りの相談文を作る（チャットに貼る。APIなし）
     python -m choruko suggest                 # 今日の「ちょる子ならこうする」レポート（AI）
     python -m choruko pos add 8035 38000 100 --wallet attack
     python -m choruko pos list / pos rm 8035
@@ -119,12 +120,56 @@ def cmd_distill(a):
         f.write(f"\n### {date.today()} 追記（{len(todo)}件から）\n{notes.strip()}\n")
     advisor.DISTILLED_JSON.write_text(json.dumps(sorted(done | {s['id'] for s in todo})))
     print(notes)
-    print(f"\n→ {advisor.LEARNED_MD} に追記しました。内容を確認して、確かなものは playbook.md に昇格させてください。")
+    print(f"\n→ {advisor.LEARNED_MD} に追記しました。内容を確認して、確かなものは choruko_kb.md に統合してください。")
 
 
 def cmd_screen(a):
     summary, cands, snaps, regime = gather_market(a.nvi, a.fg)
     print_screen(summary, rules.rank(cands, a.top), check_positions(snaps, regime))
+
+
+def build_prompt(today, summary, top, pos_checks, sources):
+    fg = summary["fear_greed"] or {}
+    n225 = summary["nikkei225"] or {}
+    lines = [
+        f"【今日の相場】日付: {today}",
+        f"- Fear & Greed: {fg.get('score', '取得できず')} / {fg.get('rating', '')}",
+        f"- 日経VI: {summary['nikkei_vi'] or '取得できず'}",
+        f"- VIX: {summary['vix'] or '取得できず'}",
+        f"- 日経平均: 終値 {n225.get('last')}、前日比 {n225.get('chg1d%')}%、"
+        f"20日高値から {n225.get('dd20d%')}%、25日線乖離 {n225.get('ma25dev%')}%",
+        f"- ルール上の地合い判定: {summary['regime_note']}",
+        "",
+        "【ルールで機械的に拾った逆張り候補】（時価総額1兆円級・安くなっている順）",
+    ]
+    if not top:
+        lines.append("- 該当なし")
+    for c in top:
+        d = c.to_dict()
+        m, pl = d["metrics"], d["plan"]
+        lines.append(f"- {d['code']} {d['name']}（{d['sector']}{'・業界1位' if d['leader'] else ''}）"
+                     f" 終値{pl['entry']} 前日比{m['chg1d%']}% / {' / '.join(d['signals'])}"
+                     f" → 損切り目安{pl['stop']}、25日線{pl['target_ma25']}")
+    lines += ["", "【私の保有】"]
+    lines += [f"- {p['code']} 買値{p['entry']} → {p['last']}（{p['pnl%']}%、{p['wallet']}）: "
+              f"{' / '.join(p['actions'])}" for p in pos_checks] or ["- なし（または未登録）"]
+    if sources:
+        lines += ["", "【最近集めたちょる子関連の記事・投稿】"]
+        lines += [f"- {(s.get('published') or '')[:10]} {s['title']} {s.get('url', '')}" for s in sources]
+    lines += ["", "【聞きたいこと】", "ちょる子なら今日どう動く？"]
+    return "\n".join(lines)
+
+
+def cmd_prompt(a):
+    summary, cands, snaps, regime = gather_market(a.nvi, a.fg)
+    today = date.today().isoformat()
+    text = build_prompt(today, summary, rules.rank(cands, a.top),
+                        check_positions(snaps, regime), collector.recent(a.sources))
+    C.REPORTS_DIR.mkdir(exist_ok=True)
+    path = C.REPORTS_DIR / f"prompt-{today}.md"
+    path.write_text(text, encoding="utf-8")
+    print(text)
+    log(f"\n保存: {path}  ← これを「ちょる子視点アナリスト」のチャットに貼ってください")
 
 
 def cmd_suggest(a):
@@ -177,15 +222,17 @@ def main(argv=None):
 
     sub.add_parser("distill", help="集めた情報から学びを抽出（AI）").set_defaults(fn=cmd_distill)
 
-    for name, fn in (("screen", cmd_screen), ("suggest", cmd_suggest)):
+    for name, fn in (("screen", cmd_screen), ("prompt", cmd_prompt), ("suggest", cmd_suggest)):
         p = sub.add_parser(name)
         p.add_argument("--nvi", type=float, help="日経VIを手入力")
         p.add_argument("--fg", type=float, help="Fear&Greedを手入力")
         p.add_argument("--top", type=int, default=10)
+        if name != "screen":
+            p.add_argument("--sources", type=int, default=10 if name == "prompt" else 30,
+                           help="添える蓄積情報の件数")
         if name == "suggest":
             p.add_argument("--no-web", action="store_true", help="本人の最新発言をweb検索しない")
             p.add_argument("--no-ai", action="store_true", help="AIを呼ばずルール判定だけ")
-            p.add_argument("--sources", type=int, default=30, help="AIに渡す蓄積情報の件数")
         p.set_defaults(fn=fn)
 
     p = sub.add_parser("pos", help="自分の保有ポジション")
