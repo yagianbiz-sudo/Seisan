@@ -26,12 +26,13 @@ class Indicators(unittest.TestCase):
 
 class Regime(unittest.TestCase):
     def test_levels(self):
-        self.assertEqual(rules.classify_regime(fg=15), "panic")
-        self.assertEqual(rules.classify_regime(fg=50, nvi=45), "panic")
-        self.assertEqual(rules.classify_regime(fg=30), "fear")
+        self.assertEqual(rules.classify_regime(fg=15, nvi=55), "panic")   # 両方そろう
+        self.assertEqual(rules.classify_regime(fg=50, nvi=62), "panic")   # VI 60超は単独で
+        self.assertEqual(rules.classify_regime(fg=15), "fear")            # 片方だけ
+        self.assertEqual(rules.classify_regime(fg=50, nvi=33), "fear")
         self.assertEqual(rules.classify_regime(fg=50, vix=32), "fear")
-        self.assertEqual(rules.classify_regime(fg=70, nvi=20), "greed")
-        self.assertEqual(rules.classify_regime(fg=50, nvi=24), "neutral")
+        self.assertEqual(rules.classify_regime(fg=85, nvi=20), "greed")
+        self.assertEqual(rules.classify_regime(fg=70, nvi=24), "neutral")
         self.assertIsNone(rules.classify_regime())
 
 
@@ -95,7 +96,7 @@ class CliOffline(unittest.TestCase):
             return snap([100] * 40 + [88], code) if code == "8035" else snap([100] * 41, code)
         with mock.patch.object(market, "fetch_daily", fake_daily), \
              mock.patch.object(market, "fetch_fear_greed", lambda: {"score": 18, "rating": "extreme fear"}), \
-             mock.patch.object(market, "fetch_nikkei_vi", lambda: 33.0), \
+             mock.patch.object(market, "fetch_nikkei_vi", lambda: 52.0), \
              mock.patch.object(cli, "load_positions", lambda: []), \
              mock.patch("builtins.print") as out:
             cli.main(["suggest", "--no-ai"])

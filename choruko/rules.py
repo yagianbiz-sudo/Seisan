@@ -11,23 +11,24 @@ from . import config as C
 # ---------- 地合い（5-4） ----------
 
 REGIMES = {
-    "panic": "パニック（3-2・5-4: 悲観の極み。逆張り買いの本命局面。ただし初動で持ちすぎない＝ケース6）",
-    "fear": "恐怖（打診買いを始める局面。本命は分割の2回目以降）",
-    "neutral": "中立（指数より個別の押し目だけを拾う。基本は待つ）",
-    "greed": "強欲（新規の逆張りは見送り。攻めの財布は利確を検討）",
+    "panic": "暴落（5-3: F&G 20未満と日経VI 50超がそろった、または日経VI 60超。大型優良株をまとめて買う日。ただし初動で買い増しすぎない＝ケース7）",
+    "fear": "恐怖（片方だけ恐怖。資金の一部で少しずつ。本命はそろってから）",
+    "neutral": "平常（暴落待ち。テーマ株は資金が入っているものだけ。基本は待つ）",
+    "greed": "過熱（5-5: F&G 80超は売り。新規は買わず、現物を落として先物で残る）",
 }
 
 
 def classify_regime(fg=None, nvi=None, vix=None):
-    """恐怖指数から地合いを判定。どれも取れなければ None。"""
+    """恐怖指数から地合いを判定（ナレッジ5-3）。どれも取れなければ None。"""
     if fg is None and nvi is None and vix is None:
         return None
-    if (fg is not None and fg < C.FG_EXTREME_FEAR) or (nvi is not None and nvi >= C.NVI_PANIC):
+    fg_fear = fg is not None and fg < C.FG_EXTREME_FEAR
+    if (fg_fear and nvi is not None and nvi >= C.NVI_CRASH) or (nvi is not None and nvi >= C.NVI_EXTREME):
         return "panic"
     if ((fg is not None and fg < C.FG_FEAR) or (nvi is not None and nvi >= C.NVI_FEAR)
             or (vix is not None and vix >= C.VIX_FEAR)):
         return "fear"
-    if fg is not None and fg >= C.FG_GREED and (nvi is None or nvi <= C.NVI_CALM):
+    if fg is not None and fg > C.FG_SELL:
         return "greed"
     return "neutral"
 

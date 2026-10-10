@@ -11,17 +11,17 @@ POSITIONS_JSON = DATA_DIR / "positions.json"  # 自分の保有（売りシグ�
 
 MODEL = "claude-opus-5-5"
 
-# 今年のテーマ（ナレッジ5-3・7章）。年が変わったら / 発言が出たら更新する。
+# 今年のテーマ（ナレッジ5-2・7章）。年が変わったら / 発言が出たら更新する。
 CURRENT_THEMES = ["AI・半導体", "建設", "メガバンク", "内需"]
 
-# --- 恐怖指数（ナレッジ5-4） ---
-FG_EXTREME_FEAR = 20     # Fear & Greed がこれ未満で「極度の恐怖」= 買い場（ナレッジ5-4, 確度A）
-FG_FEAR = 35
-FG_GREED = 65            # これ以上は過熱。新規の逆張り買いは控える（確度C）
-NVI_PANIC = 40           # 日経VI（確度C：一般的な目安）
-NVI_FEAR = 28
-NVI_CALM = 22
-VIX_FEAR = 30
+# --- 恐怖指数（ナレッジ5-3。動画での本人の基準） ---
+FG_EXTREME_FEAR = 20     # Fear & Greed がこれ未満＝買いサイン
+FG_FEAR = 25             # 25未満を Extreme Fear と説明している
+FG_SELL = 80             # 80超で売る（25-12）
+NVI_CRASH = 50           # F&G 20未満とそろえば暴落＝買い（26-05〜09）
+NVI_EXTREME = 60         # 単独でも買い（26-03〜04、26-09）
+NVI_FEAR = 30            # 30〜32超で大型優良株（25-11〜26-01）
+VIX_FEAR = 30            # 本人は使っていない。補助（確度C）
 
 # --- 個別株の「安いとき」（確度C） ---
 DRAWDOWN_FROM_20D_HIGH = -8.0   # %
