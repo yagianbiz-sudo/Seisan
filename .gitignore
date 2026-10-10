@@ -1,0 +1,6 @@
+__pycache__/
+# 個人データ（保有・蓄積・レポート）はコミットしない
+choruko/data/positions.json
+choruko/data/sources.jsonl
+choruko/data/distilled.json
+choruko/reports/
