@@ -99,6 +99,15 @@ def extract_lines(html):
     return out
 
 
+def page_title(html):
+    """クーポン名として記録する見出し（h1 → title の順）。"""
+    soup = BeautifulSoup(html, "html.parser")
+    for el in (soup.find("h1"), soup.title):
+        if el and el.get_text(strip=True):
+            return " ".join(el.get_text(" ", strip=True).split())
+    return ""
+
+
 def normalize(line):
     """比較用。トークン等の長いランダム文字列と数字を伏せる（時刻・アクセス数などで誤検知しないため）。"""
     line = re.sub(r"[A-Za-z0-9_\-]{20,}", "*", line)
@@ -146,7 +155,7 @@ class Notifier:
 
 
 class Recorder:
-    FIELDS = ["時刻", "県", "種別", "判定", "追加された行", "消えた行", "URL", "スナップショット"]
+    FIELDS = ["時刻", "県", "クーポン名", "種別", "判定", "追加された行", "消えた行", "URL", "スナップショット"]
 
     def __init__(self, out_dir):
         self.out_dir = out_dir
@@ -155,7 +164,7 @@ class Recorder:
         self.csv_path = os.path.join(out_dir, "events.csv")
         self.lock = threading.Lock()
 
-    def write(self, pref, kind, judge, url, added=(), removed=(), html=None):
+    def write(self, pref, kind, judge, url, added=(), removed=(), html=None, title=""):
         t = now()
         snap = ""
         if html is not None:
@@ -169,7 +178,7 @@ class Recorder:
                 w = csv.writer(f)
                 if new:
                     w.writerow(self.FIELDS)
-                w.writerow([f"{t:%Y-%m-%d %H:%M:%S}", pref, kind, judge,
+                w.writerow([f"{t:%Y-%m-%d %H:%M:%S}", pref, title, kind, judge,
                             "\n".join(added), "\n".join(removed), url, snap])
 
 
@@ -234,8 +243,9 @@ class Watcher:
             self.lines, self.prev_raw = lines, self.raw
             return
         judge = hint(added, removed)
-        self.recorder.write(self.pref, "ページ変化", judge, self.url, added, removed, html)
-        msg = "\n".join([f"＋ {s}" for s in added[:8]] + [f"－ {s}" for s in removed[:8]])
+        title = page_title(html)
+        self.recorder.write(self.pref, "ページ変化", judge, self.url, added, removed, html, title)
+        msg = (title + "\n" if title else "") + "\n".join([f"＋ {s}" for s in added[:8]] + [f"－ {s}" for s in removed[:8]])
         self.notifier.send(f"【{judge}】JTB {self.pref}", msg, self.url,
                            priority=5 if judge == "復活?" else 4)
         self.html, self.lines, self.prev_raw = html, lines, self.raw
