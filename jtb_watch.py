@@ -7,6 +7,7 @@
 を行う。変化がなければ何も記録しない。
 
 判定は「特定の文言を探す」のではなく「ページの文字・ボタンが変わったか」で行う。
+変化した行がどのクーポン区分（「【宿泊】泊数指定なし」など）かも記録する。
 起動直後に数回取得して、毎回変わる部分（時刻・トークン等）を自動で無視対象にする。
 数字だけの変化（時刻・閲覧数など）も無視する。
 
@@ -68,11 +69,12 @@ def log(msg):
 
 
 def extract_lines(html):
-    """ページを「見える文字の行」と「ボタン・リンクの状態の行」に分解する。"""
+    """ページを上から順に「見える文字の行」に分解する。
+    ボタン・リンクは押せる/押せない状態も1行にして、その位置に差し込む。
+    同じ文言（「配布終了いたしました」が複数枚など）もまとめずに残す。"""
     soup = BeautifulSoup(html, "html.parser")
     for t in soup(["script", "style", "noscript", "template", "svg"]):
         t.decompose()
-    lines = []
     for el in soup.find_all(["a", "button", "input"]):
         if el.name == "input" and el.get("type", "").lower() == "hidden":
             continue
@@ -86,25 +88,15 @@ def extract_lines(html):
         if not label and not flags:
             continue
         href = (el.get("href") or "").split("?")[0]
-        lines.append(f"[{el.name}] {label} {href} {' '.join(flags)}".rstrip())
-    for raw in soup.get_text("\n").splitlines():
-        s = " ".join(raw.split())
-        if s:
-            lines.append(s)
-    seen, out = set(), []
-    for s in lines:
-        if s not in seen:
-            seen.add(s)
-            out.append(s)
-    return out
+        el.insert_before(f"\n[{el.name}] {label} {href} {' '.join(flags)}".rstrip() + "\n")
+    return [" ".join(raw.split()) for raw in soup.get_text("\n").splitlines() if raw.strip()]
 
 
-def page_title(html):
-    """クーポン名として記録する見出し（h1 → title の順）。"""
-    soup = BeautifulSoup(html, "html.parser")
-    for el in (soup.find("h1"), soup.title):
-        if el and el.get_text(strip=True):
-            return " ".join(el.get_text(" ", strip=True).split())
+def section_of(lines, idx):
+    """idx 行目が属するクーポン区分（直前の「【宿泊】泊数指定なし」のような「【」で始まる行）。"""
+    for i in range(min(idx, len(lines) - 1), -1, -1):
+        if lines[i].startswith("【"):
+            return lines[i]
     return ""
 
 
@@ -155,7 +147,7 @@ class Notifier:
 
 
 class Recorder:
-    FIELDS = ["時刻", "県", "クーポン名", "種別", "判定", "追加された行", "消えた行", "URL", "スナップショット"]
+    FIELDS = ["時刻", "県", "クーポン区分", "種別", "判定", "追加された行", "消えた行", "URL", "スナップショット"]
 
     def __init__(self, out_dir):
         self.out_dir = out_dir
@@ -164,7 +156,7 @@ class Recorder:
         self.csv_path = os.path.join(out_dir, "events.csv")
         self.lock = threading.Lock()
 
-    def write(self, pref, kind, judge, url, added=(), removed=(), html=None, title=""):
+    def write(self, pref, kind, judge, url, added=(), removed=(), html=None, where=""):
         t = now()
         snap = ""
         if html is not None:
@@ -178,7 +170,7 @@ class Recorder:
                 w = csv.writer(f)
                 if new:
                     w.writerow(self.FIELDS)
-                w.writerow([f"{t:%Y-%m-%d %H:%M:%S}", pref, title, kind, judge,
+                w.writerow([f"{t:%Y-%m-%d %H:%M:%S}", pref, where, kind, judge,
                             "\n".join(added), "\n".join(removed), url, snap])
 
 
@@ -189,15 +181,14 @@ class Watcher:
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
         self.ignore = set()
-        self.lines = None
+        self.items = None  # [(比較用の行, 元の行), ...]
         self.html = None
-        self.raw = {}  # 比較用の行 → 表示用の元の行
-        self.prev_raw = {}
         self.errors = 0
         self.in_error = False
         self.checks = 0
 
     def fetch(self):
+        """(html, [(比較用の行, 元の行), ...]) を返す。比較は数字を伏せた行、記録は元の行で行う。"""
         r = self.session.get(self.url, timeout=10)
         if r.status_code >= 400:
             raise RuntimeError(f"HTTP {r.status_code}")
@@ -206,54 +197,50 @@ class Watcher:
         # ログイン画面などへ飛ばされたら、それも「変化」として拾う
         if r.url.split("?")[0] != self.url:
             raw.insert(0, f"[redirect] {r.url.split('?')[0]}")
-        lines, self.raw = [], {}
-        for s in raw:
-            n = normalize(s)
-            if n not in self.raw:
-                self.raw[n] = s
-                lines.append(n)
-        return r.text, lines
+        return r.text, [(normalize(x), x) for x in raw if normalize(x) not in self.ignore]
 
     def warmup(self):
         """数回取得して、毎回変わる行（時刻やトークン）を無視対象として覚える。"""
         samples = []
         for _ in range(WARMUP_FETCHES):
-            html, lines = self.fetch()
-            samples.append(set(lines))
+            html, items = self.fetch()
+            samples.append({n for n, _ in items})
             time.sleep(self.interval)
-        common = set.intersection(*samples)
-        self.ignore = set.union(*samples) - common
-        self.html, self.lines = html, [s for s in lines if s not in self.ignore]
-        self.prev_raw = self.raw
-        log(f"{self.pref}: 監視開始（{len(self.lines)}行を監視 / 揺れる{len(self.ignore)}行は無視）")
+        self.ignore = set.union(*samples) - set.intersection(*samples)
+        self.html, self.items = html, [(n, x) for n, x in items if n not in self.ignore]
+        log(f"{self.pref}: 監視開始（{len(self.items)}行を監視 / 揺れる{len(self.ignore)}行は無視）")
 
     def check(self):
-        html, lines = self.fetch()
-        lines = [s for s in lines if s not in self.ignore]
-        if lines == self.lines:
-            self.prev_raw = self.raw
+        html, items = self.fetch()
+        old = [n for n, _ in self.items]
+        new = [n for n, _ in items]
+        if old == new:
             return
-        added, removed = [], []
-        for op in difflib.ndiff(self.lines, lines):
-            if op.startswith("+ "):
-                added.append(self.raw[op[2:]])
-            elif op.startswith("- "):
-                removed.append(self.prev_raw.get(op[2:], op[2:]))
-        if not added and not removed:  # 並び順だけの変化は無視
-            self.lines, self.prev_raw = lines, self.raw
-            return
+        old_raw = [x for _, x in self.items]
+        new_raw = [x for _, x in items]
+        added, removed, sections = [], [], []
+        for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+            if op == "equal":
+                continue
+            removed += old_raw[i1:i2]
+            added += new_raw[j1:j2]
+            if i2 > i1:
+                sections.append(section_of(old_raw, i2 - 1))
+            if j2 > j1:
+                sections.append(section_of(new_raw, j2 - 1))
+        sections = list(dict.fromkeys(x for x in sections if x)) or ["（区分不明）"]
         judge = hint(added, removed)
-        title = page_title(html)
-        self.recorder.write(self.pref, "ページ変化", judge, self.url, added, removed, html, title)
-        msg = (title + "\n" if title else "") + "\n".join([f"＋ {s}" for s in added[:8]] + [f"－ {s}" for s in removed[:8]])
+        where = " / ".join(sections)
+        self.recorder.write(self.pref, "ページ変化", judge, self.url, added, removed, html, where)
+        msg = where + "\n" + "\n".join([f"＋ {x}" for x in added[:8]] + [f"－ {x}" for x in removed[:8]])
         self.notifier.send(f"【{judge}】JTB {self.pref}", msg, self.url,
                            priority=5 if judge == "復活?" else 4)
-        self.html, self.lines, self.prev_raw = html, lines, self.raw
+        self.html, self.items = html, items
 
     def run(self, stop):
         backoff = self.interval
         while not stop.is_set():
-            if self.lines is None:
+            if self.items is None:
                 try:
                     self.warmup()
                 except Exception as e:
@@ -314,8 +301,8 @@ def main(argv=None):
         for pref, url in targets.items():
             w = Watcher(pref, url, args.interval, notifier, None)
             try:
-                w.fetch()
-                lines = list(w.raw.values())
+                _, items = w.fetch()
+                lines = [x for _, x in items]
             except Exception as e:
                 print(f"\n===== {pref}: 取得失敗 {e}")
                 continue
@@ -343,7 +330,7 @@ def main(argv=None):
         while True:
             time.sleep(HEARTBEAT_SEC)
             log("稼働中: " + " / ".join(
-                f"{w.pref} {'失敗中' if w.in_error else ('準備中' if w.lines is None else f'{w.checks}回')}"
+                f"{w.pref} {'失敗中' if w.in_error else ('準備中' if w.items is None else f'{w.checks}回')}"
                 for w in watchers))
     except KeyboardInterrupt:
         pass
