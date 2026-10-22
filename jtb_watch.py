@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
-"""JTB「九州ふっこう応援割」クーポンページ変化監視（Google Colab / PC 両対応）。
+"""JTB「九州ふっこう応援割」クーポン復活監視（Google Colab / PC 両対応）。
 
-各県のクーポンページを1秒おきに取得し、内容が変わったときだけ
-  - スマホへプッシュ通知（ntfy。音はスマホ側だけ、PCは無音）
-  - 記録（events.csv に差分、snapshots/ に変化後のHTML）
-を行う。変化がなければ何も記録しない。
+ページの「配布終了いたしました」は HTML には入っておらず、ページを開いた後に
+KARTE（JTB が使っている外部ツール）の JavaScript が各カードに `c-close` クラスを付けて表示している。
+そのため requests では検知できない。Playwright で実際の Chrome にページを開かせ、
+描画後の各カードが c-close か否かを読む。
+（ヘッドレス Chrome は JTB 側で 403 になるので、画面付きで起動する。Colab では xvfb の仮想画面を使う）
 
-判定は「特定の文言を探す」のではなく「ページの文字・ボタンが変わったか」で行う。
-変化した行がどのクーポン区分（「【宿泊】泊数指定なし」など）かも記録する。
-起動直後に数回取得して、毎回変わる部分（時刻・トークン等）を自動で無視対象にする。
-数字だけの変化（時刻・閲覧数など）も無視する。
+各県を順番に開き、前回と比べて
+  - カードの配布終了 → 配布中（復活）/ 配布中 → 配布終了
+  - カードの中身（枚数・割引・コード）の変更、カードの増減
+  - 「更新情報」欄の変更
+があったときだけ、スマホへ通知（ntfy）し、events.csv とスナップショットに記録する。
 
 使い方:
     python jtb_watch.py --ntfy 好きなトピック名           # 監視開始
     python jtb_watch.py --ntfy 好きなトピック名 --test    # 通知テスト
-    python jtb_watch.py --inspect                         # 取得できた文字・ボタンを表示（動作確認）
-    python jtb_watch.py --only 熊本 長崎 --interval 2
+    python jtb_watch.py --inspect                         # 各県のカードと状態を表示（動作確認）
+    python jtb_watch.py --only 熊本 長崎 --interval 20
+    python jtb_watch.py --target テスト=http://localhost:8000/fake.html   # 偽ページで試す
 Colab では jtb_watch_colab.ipynb を使う。
 """
 import argparse
 import csv
-import difflib
 import os
-import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -39,25 +40,19 @@ TARGETS = {
     "佐賀": PAGE.format("2609kyushusaga"),
     "長崎": PAGE.format("2609kyushunagasaki"),
     "鹿児島": PAGE.format("2609kyushukagoshima"),
+    "宮崎": PAGE.format("2609kyushumiyazaki"),
 }
 
-# 差分の追加行/削除行にこれらが含まれたら、通知タイトルに「復活?」「終了?」を付ける（目安）。
-# ページ文言が分かったら調整する。判定に関係なく、変化があれば必ず通知・記録はする。
-REVIVE_WORDS = ["取得する", "獲得する", "クーポンを取得", "予約する", "配布中"]
-END_WORDS = ["終了", "上限", "予定枚数", "在庫", "受付停止", "なくなり"]
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    ),
-    "Accept-Language": "ja,en;q=0.8",
-}
-
-WARMUP_FETCHES = 4        # 起動時に取得して揺れる行を学習する回数
-ERROR_NOTIFY_AFTER = 10   # 連続失敗がこの回数に達したら異変として通知・記録
-MAX_BACKOFF = 60          # 失敗時の待ち時間の上限(秒)
-HEARTBEAT_SEC = 300       # 画面にだけ出す生存表示の間隔（記録はしない）
+# KARTE が配布終了の印を付け終わった目印: 配布終了のカード、全部終了のときのページ側の印。
+# （KARTE のコピーボタン .karte-wrapper は終了の印より先に付くので、目印には使えない）
+# 全カード配布中なら印は出ないので、READY_TIMEOUT_MS 待って出なければ「全部配布中」と読む。
+READY_JS = "() => document.querySelector('.c-coupon__data.c-close, .l-entry.karte-close')"
+READY_TIMEOUT_MS = 8000
+SETTLE_MS = 500           # 印が出始めてから、残りのカードに付き終わるまで待つ
+ERROR_NOTIFY_AFTER = 5    # 連続失敗がこの回数に達したら異変として通知・記録
+MAX_BACKOFF = 120         # 失敗時の待ち時間の上限(秒)
+HEARTBEAT_SEC = 600       # 画面にだけ出す生存表示の間隔（記録はしない）
+RESTART_EVERY = 500       # この回数ページを開いたらブラウザを開き直す（メモリ対策）
 
 
 def now():
@@ -68,57 +63,78 @@ def log(msg):
     print(f"[{now():%m/%d %H:%M:%S}] {msg}", flush=True)
 
 
-def extract_lines(html):
-    """ページを上から順に「見える文字の行」に分解する。
-    ボタン・リンクは押せる/押せない状態も1行にして、その位置に差し込む。
-    同じ文言（「配布終了いたしました」が複数枚など）もまとめずに残す。"""
+def _text(el):
+    return " ".join(el.get_text(" ", strip=True).split()) if el else ""
+
+
+def parse_page(html):
+    """描画後の HTML から {"cards": [...], "updates": [...]} を作る。
+    cards の各要素: section（区分見出し）, no（区分内で何枚目）, name, count, price, code, password, closed"""
     soup = BeautifulSoup(html, "html.parser")
-    for t in soup(["script", "style", "noscript", "template", "svg"]):
-        t.decompose()
-    for el in soup.find_all(["a", "button", "input"]):
-        if el.name == "input" and el.get("type", "").lower() == "hidden":
+    entry = soup.select_one(".l-entry")
+    all_closed = bool(entry and "karte-close" in entry.get("class", []))
+    cards = []
+    sec = soup.select_one(".sec-coupon")
+    if sec:
+        section, no = "", 0
+        # 区分見出し p.note の後ろにその区分のカードが並ぶ。文書順にたどる
+        for el in sec.find_all(["p", "div"]):
+            classes = el.get("class", [])
+            if el.name == "p" and "note" in classes:
+                section, no = _text(el), 0
+            elif el.name == "div" and "c-coupon__data" in classes:
+                no += 1
+                labels = [_text(x) for x in el.select(".c-code .label")]
+                cards.append({
+                    "section": section,
+                    "no": no,
+                    "name": _text(el.select_one(".cnt-stay")),
+                    "count": _text(el.select_one(".cnt-number")),
+                    "price": _text(el.select_one(".c-price")),
+                    "code": labels[0] if labels else "",
+                    "password": labels[1] if len(labels) > 1 else "",
+                    "closed": all_closed or "c-close" in classes,
+                })
+    updates = [_text(li) for li in soup.select(".c-update li")]
+    return {"cards": cards, "updates": updates}
+
+
+def card_label(c):
+    return f"{c['section']} {c['no']}枚目"
+
+
+def card_detail(c):
+    return f"{c['name']} {c['count']} {c['price']} コード {c['code']} / パスワード {c['password']}"
+
+
+def diff_pages(old, new):
+    """前回と今回の parse_page 結果を比べ、[(判定, 区分, 何枚目, 内容), ...] を返す。"""
+    events = []
+    key = lambda c: (c["section"], c["no"])
+    old_cards = {key(c): c for c in old["cards"]}
+    new_cards = {key(c): c for c in new["cards"]}
+    for k, c in new_cards.items():
+        o = old_cards.get(k)
+        if o is None:
+            events.append(("カード追加", c["section"], c["no"], card_detail(c)))
             continue
-        label = " ".join(el.get_text(" ", strip=True).split()) or el.get("value", "") or el.get("alt", "")
-        flags = []
-        if el.has_attr("disabled"):
-            flags.append("disabled")
-        cls = " ".join(el.get("class", []))
-        if any(k in cls for k in ("disable", "inactive", "end", "off", "soldout")):
-            flags.append(f"class={cls}")
-        if not label and not flags:
-            continue
-        href = (el.get("href") or "").split("?")[0]
-        el.insert_before(f"\n[{el.name}] {label} {href} {' '.join(flags)}".rstrip() + "\n")
-    return [" ".join(raw.split()) for raw in soup.get_text("\n").splitlines() if raw.strip()]
+        if o["closed"] and not c["closed"]:
+            events.append(("復活", c["section"], c["no"], card_detail(c)))
+        elif not o["closed"] and c["closed"]:
+            events.append(("終了", c["section"], c["no"], card_detail(c)))
+        if card_detail(o) != card_detail(c):
+            events.append(("内容変更", c["section"], c["no"], f"{card_detail(o)} → {card_detail(c)}"))
+    for k, o in old_cards.items():
+        if k not in new_cards:
+            events.append(("カード削除", o["section"], o["no"], card_detail(o)))
+    added = [u for u in new["updates"] if u not in old["updates"]]
+    if added:
+        events.append(("更新情報", "", "", " / ".join(added)))
+    return events
 
 
-def section_of(lines, idx):
-    """idx 行目が属するクーポン区分（直前の「【宿泊】泊数指定なし」のような「【」で始まる行）。"""
-    for i in range(min(idx, len(lines) - 1), -1, -1):
-        if lines[i].startswith("【"):
-            return lines[i]
-    return ""
-
-
-def normalize(line):
-    """比較用。トークン等の長いランダム文字列と数字を伏せる（時刻・アクセス数などで誤検知しないため）。"""
-    line = re.sub(r"[A-Za-z0-9_\-]{20,}", "*", line)
-    return re.sub(r"[0-9０-９]+", "#", line)
-
-
-def hint(added, removed):
-    """差分から「復活?」「終了?」の目安を付ける。押せないボタン(disabled)は終了側に数える。"""
-    def has(words, s):
-        return any(w in s for w in words)
-    revive = sum(has(REVIVE_WORDS, s) and "disabled" not in s for s in added)
-    revive += sum(has(END_WORDS, s) for s in removed)
-    end = sum(has(REVIVE_WORDS, s) for s in removed)
-    end += sum(has(END_WORDS, s) or (has(REVIVE_WORDS, s) and "disabled" in s) for s in added)
-    if revive > end:
-        return "復活?"
-    if end > revive:
-        return "終了?"
-    return "変化"
+def open_cards(page):
+    return [c for c in page["cards"] if not c["closed"]]
 
 
 class Notifier:
@@ -147,7 +163,7 @@ class Notifier:
 
 
 class Recorder:
-    FIELDS = ["時刻", "県", "クーポン区分", "種別", "判定", "追加された行", "消えた行", "URL", "スナップショット"]
+    FIELDS = ["時刻", "県", "判定", "クーポン区分", "何枚目", "クーポンの中身", "URL", "スナップショット"]
 
     def __init__(self, out_dir):
         self.out_dir = out_dir
@@ -156,7 +172,8 @@ class Recorder:
         self.csv_path = os.path.join(out_dir, "events.csv")
         self.lock = threading.Lock()
 
-    def write(self, pref, kind, judge, url, added=(), removed=(), html=None, where=""):
+    def write(self, pref, rows, url, html=None):
+        """rows: [(判定, 区分, 何枚目, 中身), ...]"""
         t = now()
         snap = ""
         if html is not None:
@@ -170,98 +187,111 @@ class Recorder:
                 w = csv.writer(f)
                 if new:
                     w.writerow(self.FIELDS)
-                w.writerow([f"{t:%Y-%m-%d %H:%M:%S}", pref, where, kind, judge,
-                            "\n".join(added), "\n".join(removed), url, snap])
+                for judge, section, no, detail in rows:
+                    w.writerow([f"{t:%Y-%m-%d %H:%M:%S}", pref, judge, section, no, detail, url, snap])
+
+
+class Browser:
+    """Playwright の Chrome を1つ開き、ページを開いて描画後の HTML を返す。"""
+
+    def __init__(self, headless=False):
+        self.headless = headless
+        self.pw = self.browser = self.page = None
+        self.loads = 0
+
+    def start(self):
+        from playwright.sync_api import sync_playwright
+        self.pw = sync_playwright().start()
+        # 画面外に出して邪魔にならないようにする（Colab では xvfb の仮想画面に出る）
+        self.browser = self.pw.chromium.launch(headless=self.headless, args=["--window-position=-2400,0"])
+        self.page = self.browser.new_page()
+        # 画像・フォント・動画は判定に要らないので読まない（軽くするため）
+        self.page.route("**/*", lambda r: r.abort()
+                        if r.request.resource_type in ("image", "font", "media") else r.continue_())
+        self.loads = 0
+
+    def stop(self):
+        for closer in (lambda: self.browser.close(), lambda: self.pw.stop()):
+            try:
+                closer()
+            except Exception:
+                pass
+        self.pw = self.browser = self.page = None
+
+    def get(self, url):
+        if self.page is None or self.loads >= RESTART_EVERY:
+            self.stop()
+            self.start()
+        self.loads += 1
+        resp = self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        if resp is None or resp.status >= 400:
+            raise RuntimeError(f"HTTP {resp.status if resp else '応答なし'}")
+        if self.page.url.split("?")[0] != url.split("?")[0]:
+            raise RuntimeError(f"別のページに移動しました: {self.page.url}")
+        try:
+            self.page.wait_for_function(READY_JS, timeout=READY_TIMEOUT_MS)
+            self.page.wait_for_timeout(SETTLE_MS)
+        except Exception:
+            # 印が1つも出ない = 全カード配布中か、KARTE が読み込めていない
+            if not self.page.evaluate("() => !!window.krt"):
+                raise RuntimeError("KARTE が読み込まれず、配布状態を判定できません")
+        return self.page.content()
 
 
 class Watcher:
-    def __init__(self, pref, url, interval, notifier, recorder):
-        self.pref, self.url, self.interval = pref, url, interval
+    def __init__(self, pref, url, notifier, recorder):
+        self.pref, self.url = pref, url
         self.notifier, self.recorder = notifier, recorder
-        self.session = requests.Session()
-        self.session.headers.update(HEADERS)
-        self.ignore = set()
-        self.items = None  # [(比較用の行, 元の行), ...]
-        self.html = None
+        self.state = None
         self.errors = 0
         self.in_error = False
         self.checks = 0
 
-    def fetch(self):
-        """(html, [(比較用の行, 元の行), ...]) を返す。比較は数字を伏せた行、記録は元の行で行う。"""
-        r = self.session.get(self.url, timeout=10)
-        if r.status_code >= 400:
-            raise RuntimeError(f"HTTP {r.status_code}")
-        r.encoding = r.encoding if r.encoding and r.encoding.lower() != "iso-8859-1" else r.apparent_encoding
-        raw = extract_lines(r.text)
-        # ログイン画面などへ飛ばされたら、それも「変化」として拾う
-        if r.url.split("?")[0] != self.url:
-            raw.insert(0, f"[redirect] {r.url.split('?')[0]}")
-        return r.text, [(normalize(x), x) for x in raw if normalize(x) not in self.ignore]
+    def check(self, browser):
+        try:
+            html = browser.get(self.url)
+            page = parse_page(html)
+            if not page["cards"]:
+                raise RuntimeError("クーポンのカードが見つかりません（ページの作りが変わった可能性）")
+            if self.state is not None:
+                events = diff_pages(self.state, page)
+                if any(e[0] == "復活" for e in events):
+                    # 読み込みの途中を拾った誤検知を避けるため、もう一度開いて確かめる
+                    html = browser.get(self.url)
+                    page = parse_page(html)
+                    events = diff_pages(self.state, page)
+        except Exception as e:
+            self._error(e)
+            return False
+        self.checks += 1
+        if self.in_error:
+            self.recorder.write(self.pref, [("取得復旧", "", "", "")], self.url)
+            self.notifier.send(f"JTB {self.pref} 監視復旧", "再び取得できています", self.url, 3)
+        self.errors, self.in_error = 0, False
+        if self.state is None:
+            self.state = page
+            opened = open_cards(page)
+            log(f"{self.pref}: 監視開始（カード{len(page['cards'])}枚 / 配布中{len(opened)}枚）")
+            if opened:
+                rows = [("開始時に配布中", c["section"], c["no"], card_detail(c)) for c in opened]
+                self.recorder.write(self.pref, rows, self.url, html)
+                self._notify("配布中", rows)
+            return True
+        self.state = page
+        if events:
+            self.recorder.write(self.pref, events, self.url, html)
+            judges = [e[0] for e in events]
+            top = "復活" if "復活" in judges else ("終了" if "終了" in judges else "変化")
+            self._notify(top, events)
+        return True
 
-    def warmup(self):
-        """数回取得して、毎回変わる行（時刻やトークン）を無視対象として覚える。"""
-        samples = []
-        for _ in range(WARMUP_FETCHES):
-            html, items = self.fetch()
-            samples.append({n for n, _ in items})
-            time.sleep(self.interval)
-        self.ignore = set.union(*samples) - set.intersection(*samples)
-        self.html, self.items = html, [(n, x) for n, x in items if n not in self.ignore]
-        log(f"{self.pref}: 監視開始（{len(self.items)}行を監視 / 揺れる{len(self.ignore)}行は無視）")
-
-    def check(self):
-        html, items = self.fetch()
-        old = [n for n, _ in self.items]
-        new = [n for n, _ in items]
-        if old == new:
-            return
-        old_raw = [x for _, x in self.items]
-        new_raw = [x for _, x in items]
-        added, removed, sections = [], [], []
-        for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
-            if op == "equal":
-                continue
-            removed += old_raw[i1:i2]
-            added += new_raw[j1:j2]
-            if i2 > i1:
-                sections.append(section_of(old_raw, i2 - 1))
-            if j2 > j1:
-                sections.append(section_of(new_raw, j2 - 1))
-        sections = list(dict.fromkeys(x for x in sections if x)) or ["（区分不明）"]
-        judge = hint(added, removed)
-        where = " / ".join(sections)
-        self.recorder.write(self.pref, "ページ変化", judge, self.url, added, removed, html, where)
-        msg = where + "\n" + "\n".join([f"＋ {x}" for x in added[:8]] + [f"－ {x}" for x in removed[:8]])
-        self.notifier.send(f"【{judge}】JTB {self.pref}", msg, self.url,
-                           priority=5 if judge == "復活?" else 4)
-        self.html, self.items = html, items
-
-    def run(self, stop):
-        backoff = self.interval
-        while not stop.is_set():
-            if self.items is None:
-                try:
-                    self.warmup()
-                except Exception as e:
-                    self._error(e)
-                    stop.wait(min(MAX_BACKOFF, backoff))
-                    backoff *= 2
-                    continue
-            started = time.monotonic()
-            try:
-                self.check()
-                self.checks += 1
-                if self.in_error:
-                    self.recorder.write(self.pref, "取得復旧", "", self.url)
-                    self.notifier.send(f"JTB {self.pref} 監視復旧", "再び取得できています", self.url, 3)
-                self.errors, self.in_error, backoff = 0, False, self.interval
-            except Exception as e:
-                self._error(e)
-                backoff = min(MAX_BACKOFF, backoff * 2)
-                stop.wait(backoff)
-                continue
-            stop.wait(max(0.0, self.interval - (time.monotonic() - started)))
+    def _notify(self, top, rows):
+        lines = []
+        for judge, section, no, detail in rows[:10]:
+            where = f"{section} {no}枚目 " if section else ""
+            lines.append(f"{where}{judge} / {detail}")
+        self.notifier.send(f"【{top}】JTB {self.pref}", "\n".join(lines), self.url,
+                           priority=5 if top in ("復活", "配布中") else 3)
 
     def _error(self, e):
         self.errors += 1
@@ -269,75 +299,89 @@ class Watcher:
             log(f"{self.pref}: 取得失敗({self.errors}) {e}")
         if self.errors == ERROR_NOTIFY_AFTER and not self.in_error:
             self.in_error = True
-            self.recorder.write(self.pref, "取得失敗", str(e), self.url)
+            self.recorder.write(self.pref, [("取得失敗", "", "", str(e))], self.url)
             self.notifier.send(f"JTB {self.pref} 監視できていません",
                                f"{self.errors}回連続で取得失敗: {e}\nブロックされている可能性があります",
                                self.url, 4)
 
 
 def parse_args(argv=None):
-    ap = argparse.ArgumentParser(description="JTBクーポンページ変化監視")
+    ap = argparse.ArgumentParser(description="JTBクーポン復活監視")
     ap.add_argument("--ntfy", help="ntfy のトピック名（スマホアプリで同じ名前を購読）")
     ap.add_argument("--ntfy-server", default="https://ntfy.sh")
     ap.add_argument("--discord", help="Discord Webhook URL（任意）")
     ap.add_argument("--out", default="jtb_log", help="記録の保存先フォルダ")
-    ap.add_argument("--interval", type=float, default=1.0, help="各ページの取得間隔(秒)")
+    ap.add_argument("--interval", type=float, default=10.0, help="各県を見に行く間隔(秒)")
     ap.add_argument("--only", nargs="+", help="監視する県を絞る（例: --only 熊本 長崎）")
+    ap.add_argument("--target", nargs="+", metavar="名前=URL", help="監視先を指定して置き換える（動作確認用）")
+    ap.add_argument("--max-checks", type=int, default=0, help="この周回数で止める（動作確認用。0なら止めない）")
     ap.add_argument("--test", action="store_true", help="通知テストして終了")
-    ap.add_argument("--inspect", action="store_true", help="取得結果を表示して終了")
+    ap.add_argument("--inspect", action="store_true", help="各県のカードと状態を表示して終了")
     return ap.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
-    targets = {k: v for k, v in TARGETS.items() if not args.only or k in args.only}
+    if args.target:
+        targets = dict(t.split("=", 1) for t in args.target)
+    else:
+        targets = {k: v for k, v in TARGETS.items() if not args.only or k in args.only}
     notifier = Notifier(args.ntfy, args.ntfy_server, args.discord)
 
     if args.test:
         notifier.send("JTB監視テスト", "この通知が届けば設定OKです", next(iter(TARGETS.values())), 4)
         return
 
+    browser = Browser()
     if args.inspect:
-        for pref, url in targets.items():
-            w = Watcher(pref, url, args.interval, notifier, None)
-            try:
-                _, items = w.fetch()
-                lines = [x for _, x in items]
-            except Exception as e:
-                print(f"\n===== {pref}: 取得失敗 {e}")
-                continue
-            print(f"\n===== {pref} ({len(lines)}行) {url}")
-            for s in lines:
-                print("  " + s)
+        try:
+            for pref, url in targets.items():
+                try:
+                    page = parse_page(browser.get(url))
+                except Exception as e:
+                    print(f"\n===== {pref}: 取得失敗 {e}", flush=True)
+                    continue
+                print(f"\n===== {pref} カード{len(page['cards'])}枚 / 配布中{len(open_cards(page))}枚 {url}")
+                for c in page["cards"]:
+                    print(f"  {'終了  ' if c['closed'] else '配布中'} {card_label(c)} {card_detail(c)}")
+                for u in page["updates"]:
+                    print(f"  [更新情報] {u}")
+        finally:
+            browser.stop()
         return
 
     if not args.ntfy and not args.discord:
         log("注意: 通知先が未設定です（--ntfy か --discord）。画面表示と記録のみ行います")
 
     recorder = Recorder(args.out)
-    stop = threading.Event()
-    watchers = [Watcher(p, u, args.interval, notifier, recorder) for p, u in targets.items()]
-    threads = []
-    for i, w in enumerate(watchers):
-        th = threading.Thread(target=w.run, args=(stop,), daemon=True)
-        th.start()
-        threads.append(th)
-        time.sleep(args.interval / max(1, len(watchers)))  # 同時アクセスを避けてずらす
-    log(f"{len(watchers)}ページを{args.interval:g}秒おきに監視中 / 記録先: {os.path.abspath(args.out)}")
+    watchers = [Watcher(p, u, notifier, recorder) for p, u in targets.items()]
+    log(f"{len(watchers)}県を{args.interval:g}秒おきに監視します / 記録先: {os.path.abspath(args.out)}")
     notifier.send("JTB監視を開始しました", "、".join(targets), priority=2)
-
+    # 1周で全県を順に開く。1周が interval 秒より短ければ待つ
+    gap = args.interval / max(1, len(watchers))
+    last_beat = time.monotonic()
+    rounds = 0
     try:
-        while True:
-            time.sleep(HEARTBEAT_SEC)
-            log("稼働中: " + " / ".join(
-                f"{w.pref} {'失敗中' if w.in_error else ('準備中' if w.items is None else f'{w.checks}回')}"
-                for w in watchers))
+        while not args.max_checks or rounds < args.max_checks:
+            for w in watchers:
+                started = time.monotonic()
+                ok = w.check(browser)
+                if not ok:
+                    browser.stop()  # 次回は開き直す
+                    time.sleep(min(MAX_BACKOFF, gap * 2 ** min(w.errors, 6)))
+                    continue
+                time.sleep(max(0.0, gap - (time.monotonic() - started)))
+            rounds += 1
+            if time.monotonic() - last_beat >= HEARTBEAT_SEC:
+                last_beat = time.monotonic()
+                log("稼働中: " + " / ".join(
+                    f"{w.pref} {'失敗中' if w.in_error else f'{w.checks}回'}" for w in watchers))
     except KeyboardInterrupt:
         pass
     finally:
-        stop.set()
+        browser.stop()
         log("監視を停止しました")
-        notifier.send("JTB監視が停止しました", "再開するにはセルを実行し直してください", priority=3)
+        notifier.send("JTB監視が停止しました", "再開するにはもう一度実行してください", priority=3)
 
 
 if __name__ == "__main__":
