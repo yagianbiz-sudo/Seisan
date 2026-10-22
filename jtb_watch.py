@@ -45,9 +45,11 @@ TARGETS = {
 
 # KARTE が配布終了の印を付け終わった目印: 配布終了のカード、全部終了のときのページ側の印。
 # （KARTE のコピーボタン .karte-wrapper は終了の印より先に付くので、目印には使えない）
-# 全カード配布中なら印は出ないので、READY_TIMEOUT_MS 待って出なければ「全部配布中」と読む。
+# 印が1枚も出ないページは「全部配布中」ではなく「判定できない」として扱う
+# （Colab など海外の回線では、KARTE が終了の印を付けない・遅いことがあり、全部配布中に見えてしまう）。
 READY_JS = "() => document.querySelector('.c-coupon__data.c-close, .l-entry.karte-close')"
-READY_TIMEOUT_MS = 8000
+READY_TIMEOUT_MS = 15000
+UNMARKED_ALERT_AFTER = 3  # 終了の印が出ない状態がこの回数続いたら、1回だけ知らせる
 SETTLE_MS = 500           # 印が出始めてから、残りのカードに付き終わるまで待つ
 ERROR_NOTIFY_AFTER = 5    # 連続失敗がこの回数に達したら異変として通知・記録
 MAX_BACKOFF = 120         # 失敗時の待ち時間の上限(秒)
@@ -96,7 +98,8 @@ def parse_page(html):
                     "closed": all_closed or "c-close" in classes,
                 })
     updates = [_text(li) for li in soup.select(".c-update li")]
-    return {"cards": cards, "updates": updates}
+    # marked: 終了の印が1つでもある = KARTE が働いていて、各カードの状態を信用できる
+    return {"cards": cards, "updates": updates, "marked": any(c["closed"] for c in cards)}
 
 
 def card_label(c):
@@ -232,20 +235,21 @@ class Browser:
             self.page.wait_for_function(READY_JS, timeout=READY_TIMEOUT_MS)
             self.page.wait_for_timeout(SETTLE_MS)
         except Exception:
-            # 印が1つも出ない = 全カード配布中か、KARTE が読み込めていない
-            if not self.page.evaluate("() => !!window.krt"):
-                raise RuntimeError("KARTE が読み込まれず、配布状態を判定できません")
+            pass  # 印が出なかった。判定は Watcher 側で「判定できない」として扱う
         return self.page.content()
 
 
 class Watcher:
-    def __init__(self, pref, url, notifier, recorder):
+    def __init__(self, pref, url, notifier, recorder, shared=None):
         self.pref, self.url = pref, url
         self.notifier, self.recorder = notifier, recorder
+        # shared["marks_seen"]: どれかの県で終了の印が読めた = この環境で KARTE が働いている
+        self.shared = shared if shared is not None else {"marks_seen": False}
         self.state = None
         self.errors = 0
         self.in_error = False
         self.checks = 0
+        self.unmarked = 0  # 終了の印が出ない状態が続いた回数
 
     def check(self, browser):
         try:
@@ -253,7 +257,7 @@ class Watcher:
             page = parse_page(html)
             if not page["cards"]:
                 raise RuntimeError("クーポンのカードが見つかりません（ページの作りが変わった可能性）")
-            if self.state is not None:
+            if self.state is not None and page["marked"]:
                 events = diff_pages(self.state, page)
                 if any(e[0] == "復活" for e in events):
                     # 読み込みの途中を拾った誤検知を避けるため、もう一度開いて確かめる
@@ -268,6 +272,13 @@ class Watcher:
             self.recorder.write(self.pref, [("取得復旧", "", "", "")], self.url)
             self.notifier.send(f"JTB {self.pref} 監視復旧", "再び取得できています", self.url, 3)
         self.errors, self.in_error = 0, False
+        if not page["marked"]:
+            self._unmarked()
+            return True
+        if self.unmarked:
+            log(f"{self.pref}: 配布終了の表示が読めるようになりました")
+        self.unmarked = 0
+        self.shared["marks_seen"] = True
         if self.state is None:
             self.state = page
             opened = open_cards(page)
@@ -284,6 +295,27 @@ class Watcher:
             top = "復活" if "復活" in judges else ("終了" if "終了" in judges else "変化")
             self._notify(top, events)
         return True
+
+    def _unmarked(self):
+        """終了の印が1枚も出なかった。全カード配布中に見えるが、KARTE が働いていないだけのことが多いので、
+        復活とはせず、続いたときに1回だけ知らせる。"""
+        self.unmarked += 1
+        if self.unmarked == 1:
+            log(f"{self.pref}: 配布終了の表示が出ません（判定を保留）")
+        if self.unmarked != UNMARKED_ALERT_AFTER:
+            return
+        if self.shared["marks_seen"]:
+            title = f"【要確認】JTB {self.pref}"
+            msg = (f"配布終了の表示が{self.unmarked}回続けて出ていません。"
+                   "全カード配布中の可能性があります。ページで確認してください")
+            priority = 4
+        else:
+            title = f"JTB {self.pref} 判定できません"
+            msg = ("配布終了の表示が出ないため、配布中かどうか判定できません。"
+                   "この環境（Colab など）では KARTE が働いていない可能性があります")
+            priority = 3
+        self.recorder.write(self.pref, [("判定保留", "", "", msg)], self.url)
+        self.notifier.send(title, msg, self.url, priority)
 
     def _notify(self, top, rows):
         lines = []
@@ -341,6 +373,9 @@ def main(argv=None):
                 except Exception as e:
                     print(f"\n===== {pref}: 取得失敗 {e}", flush=True)
                     continue
+                if not page["marked"]:
+                    print(f"\n===== {pref} カード{len(page['cards'])}枚 / 配布終了の表示が出ず判定できません {url}")
+                    continue
                 print(f"\n===== {pref} カード{len(page['cards'])}枚 / 配布中{len(open_cards(page))}枚 {url}")
                 for c in page["cards"]:
                     print(f"  {'終了  ' if c['closed'] else '配布中'} {card_label(c)} {card_detail(c)}")
@@ -354,7 +389,8 @@ def main(argv=None):
         log("注意: 通知先が未設定です（--ntfy か --discord）。画面表示と記録のみ行います")
 
     recorder = Recorder(args.out)
-    watchers = [Watcher(p, u, notifier, recorder) for p, u in targets.items()]
+    shared = {"marks_seen": False}
+    watchers = [Watcher(p, u, notifier, recorder, shared) for p, u in targets.items()]
     log(f"{len(watchers)}県を{args.interval:g}秒おきに監視します / 記録先: {os.path.abspath(args.out)}")
     notifier.send("JTB監視を開始しました", "、".join(targets), priority=2)
     # 1周で全県を順に開く。1周が interval 秒より短ければ待つ

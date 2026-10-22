@@ -133,6 +133,46 @@ class WatcherTest(unittest.TestCase):
             self.assertIn("熊本,復活,【宿泊】泊数指定なし,2,", rows[1])
             self.assertEqual(len(os.listdir(os.path.join(d, "snapshots"))), 1)
 
+    def test_unmarked_page_is_not_revival(self):
+        # 終了の印が1枚も無いページ（KARTE が働かなかった）は全部配布中と読まない
+        closed = load("jtb_kumamoto_closed.html")
+        unmarked = closed.replace("l-entry karte-close", "l-entry").replace(
+            "c-coupon__data c-close", "c-coupon__data")
+        with tempfile.TemporaryDirectory() as d:
+            notifier = FakeNotifier()
+            shared = {"marks_seen": False}
+            w = jtb_watch.Watcher("長崎", "http://example/", notifier, jtb_watch.Recorder(d), shared)
+            browser = FakeBrowser([unmarked, closed, unmarked, unmarked, unmarked, unmarked])
+            for _ in range(6):
+                self.assertTrue(w.check(browser))
+            # 基準は印のある回から取る。印の無い状態が3回続いたら「要確認」を1回だけ
+            self.assertEqual([t for t, _, _ in notifier.sent], ["【要確認】JTB 長崎"])
+            self.assertTrue(all(c["closed"] for c in w.state["cards"]))
+
+    def test_unmarked_everywhere_says_cannot_judge(self):
+        closed = load("jtb_kumamoto_closed.html")
+        unmarked = closed.replace("l-entry karte-close", "l-entry").replace(
+            "c-coupon__data c-close", "c-coupon__data")
+        with tempfile.TemporaryDirectory() as d:
+            notifier = FakeNotifier()
+            w = jtb_watch.Watcher("長崎", "http://example/", notifier, jtb_watch.Recorder(d))
+            browser = FakeBrowser([unmarked] * 4)
+            for _ in range(4):
+                w.check(browser)
+            self.assertEqual([t for t, _, _ in notifier.sent], ["JTB 長崎 判定できません"])
+            self.assertIsNone(w.state)
+
+    def test_revive_confirm_unmarked_is_ignored(self):
+        closed = load("jtb_kumamoto_closed.html")
+        unmarked = closed.replace("l-entry karte-close", "l-entry").replace(
+            "c-coupon__data c-close", "c-coupon__data")
+        with tempfile.TemporaryDirectory() as d:
+            notifier = FakeNotifier()
+            w = jtb_watch.Watcher("熊本", "http://example/", notifier, jtb_watch.Recorder(d))
+            w.check(FakeBrowser([closed]))
+            w.check(FakeBrowser([revive(closed, 2), unmarked]))
+            self.assertEqual(notifier.sent, [])
+
     def test_revive_not_confirmed_is_ignored(self):
         # 1回だけ開いて見えて、確認で消えていたら通知しない
         closed = load("jtb_kumamoto_closed.html")
