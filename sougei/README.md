@@ -1,29 +1,24 @@
-# Okurimukae-chō (送り迎え帳)
+# おくりむかえ帳
 
-A shared drop-off/pick-up notebook for couples. It shows in numbers who took the kids to and from daycare, and lets either partner request a change with a "trade card".
+夫婦の保育園送迎を「どっちが何回行ったか」数字で見える化し、予定変更は「トレード依頼カード」でやりとりする送迎分担アプリ。
 
-## What the prototype can do (v0.1)
+- 試作版：`index.html`（1ファイルで動くプロトタイプ）
+- 公開版Webアプリの開発指示書：[SPEC.md](SPEC.md)
 
-- **Basic schedule**: register drop-offs and pick-ups for each weekday and each child. The schedule fills in every day automatically.
-- **Daily duties**: tap any duty for an upcoming day to see who is in charge. A day can also be marked as "no drop-off/pick-up" (holidays, closures).
-- **Trade requests**
-  - Only the person currently in charge of a duty can **request** a trade. Nothing changes until the partner taps "Accept".
-  - The requester can add a **return favor** ("in exchange, I'll take this duty").
-  - Before sending, the screen shows **"If accepted"**: exactly which duty moves to whom.
-  - No return favor means the requester **owes one**. Volunteering to take over the partner's duty means they **owe you one**.
-- **Totals**: monthly drop-off/pick-up counts per partner, the gap between them, a ratio bar, and a breakdown by child and by drop-off vs. pick-up.
+## 試作版でできること（v0.1）
 
-Being able to take on extra work but never push it onto the other person is deliberate. It stops one person from casually saying "I've got this one" and leaving their spouse with the rest.
+- **基本パターン**：曜日ごと・子どもごとに送り／迎えの担当を登録すると、毎日の予定に自動で入る
+- **毎日の担当**：これからの予定で担当を確認できる。休園日などは「送迎なし」にできる
+- **トレード依頼**
+  - 自分の担当だけを「依頼」できる。相手が「受ける」を押すまで担当は変わらない
+  - 「お返し（代わりに私がこれを引き受ける）」をつけられる
+  - 送信前に「成立すると、どの担当が誰に移るか」を明示する
+  - お返しなしで代わってもらうと、頼んだ側に「借り1回」がつく。相手の担当を自分から引き受けると、相手に「貸し1回」がつく
+- **集計**：月ごとの送迎回数（ふたりの差、比率バー、送り／迎え別、子ども別）
 
-## How data is stored
+「自分から引き受けるのは自由、押し付けるのは相手の承認制」というルールは、「言ったからやってね」を防ぐための意図的な設計です。
 
-- Opened as a Claude artifact: both partners share the same data (the `db` capability).
-- Opened directly as `index.html`: data is saved only in that phone's browser.
-- Each phone asks once who is using it.
+## データの保存
 
-## Toward the public app (draft)
-
-1. **Try it as a couple for 2–4 weeks** with this prototype and find what's hard to use or missing.
-2. Turn it into an app: React Native (Expo) or a PWA, with Firebase/Supabase for login, data, and **push notifications** (so "You have a trade request" reaches the phone).
-3. A pairing flow that links two accounts with an invite code.
-4. Candidates: rain-day rules, linking business trips to the calendar, a monthly report, setups with three or more caregivers (e.g. grandparents).
+- Claudeのアーティファクトとして開いた場合：ふたりで同じデータを共有（`db` capability）
+- `index.html` を直接開いた場合：その端末のブラウザだけに保存
